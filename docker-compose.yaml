@@ -1,14 +1,38 @@
 services:
   mnemory:
     build: .
+    container_name: mnemory
     ports:
       - "8050:8050"
+      - "8051:8051"
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - MCP_API_KEY=${MCP_API_KEY}
+      - MCP_API_KEYS=${MCP_API_KEYS}
+      - LLM_BASE_URL=${LLM_BASE_URL}
+      - LLM_MODEL=${LLM_MODEL}
+      - EMBED_BASE_URL=${EMBED_BASE_URL}
+      - EMBED_MODEL=${EMBED_MODEL}
+      - EMBED_DIMS=${EMBED_DIMS}
+      - MGMT_PORT=8051
     volumes:
       - mnemory-data:/data
+    networks:
+      - default
+      - ai-stack
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8051/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
 volumes:
   mnemory-data:
+
+networks:
+  default: {}
+  ai-stack:
+    external: true
+    name: ai-stack_default

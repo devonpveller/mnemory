@@ -1753,6 +1753,7 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             request.url.path == "/"
             or request.url.path.startswith("/ui")
             or request.url.path == "/api/auth/exchange"
+            or request.url.path == "/api/openapi.json"
         ):
             self._set_identity_from_headers(request)
             try:
