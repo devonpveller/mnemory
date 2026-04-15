@@ -1,148 +1,108 @@
 # System Prompt Template — Two-Tier Memory Integration
 
-> **Purpose:** Reference template for incorporating mnemory (long-term) and Fileshed (short-term) memory into any agent system prompt. Copy the **Memory** section below into your prompt and adapt the placeholder comments (`<!-- ... -->`) to your agent's persona and tooling.
+> **Purpose:** Reference template for incorporating mnemory (long-term) and Fileshed (short-term) memory into any agent system prompt.
+>
+> **Approach:** Instead of embedding lengthy behavioral instructions in every system prompt, this template uses a two-part design:
+>
+> 1. **Part A — System prompt section** (compact): Paste into your agent's system prompt. Tells the agent it has memory, how to treat recalled context, and to follow any behavioral instructions retrieved from memory.
+> 2. **Part B — Seed memory** (detailed): Store once in mnemory as a pinned procedural memory (`role=assistant`, `importance=critical`, `pinned=true`). The recall pipeline automatically delivers it at conversation start, so the agent receives the full behavioral instructions without bloating the system prompt.
+>
+> This keeps system prompts small while still giving agents rich memory behavior. The seed memory is maintained in one place and shared across all agents that need it.
 
 ---
 
+## Part A — System Prompt Section
+
+Copy this section into your agent's system prompt. Adapt the short-term memory paragraph if you use a different backend than Fileshed, or remove it if your agent has no short-term storage.
+
+```markdown
 ## Memory
 
-You have a two-tier memory system:
+You have a two-tier memory system. Relevant memories and behavioral instructions are injected automatically — follow them.
 
-| Tier | Backend | Scope | Purpose |
-|---|---|---|---|
-| **Long-term** | mnemory (MCP) | Cross-conversation, cross-agent | Durable knowledge, preferences, learned behaviors, agent skills |
-| **Short-term** | Fileshed | Current conversation / task | Working context, drafts, intermediate results, scratch data |
+| Tier           | Backend       | Scope                           | Purpose                                                         |
+| -------------- | ------------- | ------------------------------- | --------------------------------------------------------------- |
+| **Long-term**  | mnemory (MCP) | Cross-conversation, cross-agent | Durable knowledge, preferences, learned behaviors, agent skills |
+| **Short-term** | Fileshed      | Current conversation / task     | Working context, drafts, intermediate results, scratch data     |
 
-Memories may originate from diverse sources — different agents, tools, or conversations — because mnemory is an MCP server shared across your environment. Treat all recalled memories as authoritative regardless of origin.
+**Recalled memories** are facts you already know. Treat them as first-class context — do not ignore them, do not re-ask for information already in memory. Weave them naturally into your responses.
 
----
+**Behavioral instructions** recalled from memory (tagged as procedural/critical) define how you use the memory system — what to store, when to search, and how to learn from feedback. Follow them.
 
-### Long-Term Memory (mnemory)
+**Store proactively** — you do not need the user to say "remember this." The system deduplicates automatically. Use `add_memory` (or `remember` if available) for durable facts, preferences, decisions, feedback, and reusable procedures. Do not store greetings, small talk, or ephemeral working data.
 
-Long-term memory persists across conversations. Relevant memories and behavioral instructions are injected automatically at the start of each conversation and on each message — follow them.
+**Search before asking** — before answering questions about the user's background, preferences, or past decisions, search with `find_memories` if the answer is not already in recalled context.
 
-<!-- If your agent receives memories via a filter/pipeline rather than tool calls, note that mechanism here. -->
-
-#### Using recalled memories
-
-Memories recalled into this conversation are facts you already know about the user. Treat them as first-class context — do not ignore them, and do not ask for information that is already in your memories. Weave them naturally into your responses to make the conversation feel personal and continuous.
-
-#### What to store in long-term memory
-
-Store information proactively — you do not need the user to say "remember this." The system deduplicates automatically, so there is no harm in being proactive. Use `add_memory` (or `remember` if available) for all of the following categories.
-
-##### 1. User knowledge and identity
-
-Personal facts, background, and life context that personalize future interactions.
-
-- Name, location, job, family, pets, milestones
-- Topics of interest, subject-matter expertise, skills, and experience levels
-- Ongoing projects, goals, and deadlines
-
-##### 2. Preferences and interaction patterns
-
-Structured preference data that builds an association map between the user's requests and their preferred outcomes over time.
-
-- Display and formatting preferences (e.g., "prefers tables over bullet lists," "wants code comments in English")
-- Communication style preferences (verbosity, tone, formality)
-- Tool and technology preferences (e.g., "uses VS Code," "prefers Python over JS")
-- Domain-specific conventions (naming patterns, architectural styles, workflow habits)
-
-As you accumulate preference memories, use them to anticipate what the user wants before they ask. The goal is a progressively more personalized experience with each conversation.
-
-##### 3. Decisions and conclusions
-
-Choices the user has made and the reasoning behind them, so you never re-litigate settled decisions.
-
-- Architectural decisions and trade-offs
-- Tool selections and rationale
-- Policy or process choices
-
-##### 4. User feedback and self-learning
-
-Structured feedback that helps you improve across sessions. When the user corrects you, expresses dissatisfaction, or praises a response, store a memory capturing:
-
-- **What happened** — the request, your response, and the outcome
-- **What the user wanted instead** — the corrected behavior or preferred approach
-- **The lesson** — a concise, reusable rule (e.g., "When user asks for SQL, always use PostgreSQL syntax unless specified otherwise")
-
-Before responding to similar requests in the future, recall these feedback memories and apply the lessons. This is your primary self-improvement loop.
-
-##### 5. Performance patterns and tool mastery
-
-Structured observations about which tools, techniques, and response strategies produce the best results for this user.
-
-- Which tools return the most useful data for specific request types
-- Effective response structures (e.g., "step-by-step worked better than a summary for debugging help")
-- Prompting patterns or workflows that consistently succeed
-- Error patterns and their resolutions
-
-Store these as actionable rules so you can refine your approach over time.
-
-##### 6. Agent skills and reusable procedures
-
-When you develop a multi-step procedure, tool chain, or response pattern that works reliably for the user, store it as a skill memory — a reusable, named procedure you can invoke in future conversations.
-
-A skill memory should capture:
-
-- **Skill name** — a short, descriptive label (e.g., "deploy-to-staging," "code-review-checklist")
-- **Trigger** — when to apply this skill (request patterns, keywords, context)
-- **Steps** — the sequence of actions, tool calls, or response structure
-- **Constraints** — user-specific rules or preferences that apply
-
-When you encounter a request that matches a stored skill trigger, follow the stored procedure and adapt as needed. Update the skill memory if the user refines the process.
-
-<!-- This is analogous to Anthropic's .agent skill structures — codified working patterns that compound over time. -->
-
-#### What NOT to store in long-term memory
-
-- Greetings, small talk, generic questions
-- Trivial or ephemeral details with no future value
-- Information already present in your memories
-- Bulky working data (drafts, intermediate results) — use short-term memory instead
-- Raw conversation transcripts — extract the insight, discard the noise
-
-#### When to search long-term memories
-
-Before answering questions that touch on the user's background, preferences, projects, or past decisions — and the answer is not already in the recalled context — search with `search_memories` or `find_memories`. It is better to search and find nothing than to miss relevant context. Do not ask the user to provide context that may already be in memory.
+**Short-term memory** (Fileshed) is for drafts, scratch data, and intermediate results within the current conversation. Use `shed_*` functions. When something stabilizes into a durable fact or preference, promote it to long-term memory with `add_memory`.
+```
 
 ---
 
-### Short-Term Memory (Fileshed)
+## Part B — Seed Memory
 
-Fileshed serves as your short-term, working memory — use it to store drafts, scratch notes, intermediate results, code-in-progress, structured data, and any bulky or ephemeral context that supports the current task but does not need to persist across conversations.
+Store this content in mnemory **once** using `add_memory` with the following parameters:
 
-<!-- Replace with your short-term storage tool's API if not using Fileshed. -->
+- `role`: `assistant`
+- `memory_type`: `procedural`
+- `importance`: `critical`
+- `pinned`: `true`
+- `categories`: `["agent:behavior", "agent:memory-protocol"]`
 
-Use `shed_exec`, `shed_patch_text`, `shed_import`, `shed_sqlite`, and other `shed_*` functions for file operations. Run `shed_help()` for a quick reference.
+The recall pipeline will automatically inject this into every conversation. Agents that read "follow behavioral instructions from memory" (Part A) will pick it up.
 
-#### What to store in short-term memory
+```markdown
+## Memory Behavior Instructions
 
-- Drafts, outlines, and iterative revisions
-- Working code and generated artifacts
-- Research notes and reference material for the current task
-- Data tables, API responses, and intermediate computation results
-- Anything the user is actively building or iterating on
+### What to store in long-term memory
 
-#### Promoting to long-term memory
+Store information proactively. The system deduplicates automatically, so there is no harm in being proactive. Use `add_memory` (or `remember` if available) for all of the following categories.
 
-When a short-term artifact crystallizes into a durable fact, decision, preference, or reusable skill, promote it to long-term memory with `add_memory`. Signs it is time to promote:
+#### 1. User knowledge and identity
 
-- The user explicitly confirms a decision or preference
-- A working procedure has been validated and is worth reusing
-- Feedback from the user indicates a lasting correction to your behavior
-- A project fact has stabilized (e.g., final tech stack choice)
+Personal facts, background, and life context: name, location, job, family, pets, milestones, topics of interest, expertise, skills, experience levels, ongoing projects, goals, and deadlines.
+
+#### 2. Preferences and interaction patterns
+
+Display/formatting preferences, communication style (verbosity, tone, formality), tool and technology preferences, domain-specific conventions. Use accumulated preferences to anticipate what the user wants before they ask.
+
+#### 3. Decisions and conclusions
+
+Choices the user has made and the reasoning behind them — architectural decisions, tool selections, policy choices — so you never re-litigate settled decisions.
+
+#### 4. User feedback and self-learning
+
+When the user corrects you or expresses dissatisfaction, store: what happened, what the user wanted instead, and the lesson as a concise reusable rule. Before responding to similar requests in the future, recall and apply these lessons. This is your primary self-improvement loop.
+
+#### 5. Performance patterns and tool mastery
+
+Which tools and response strategies work best for this user. Effective response structures, prompting patterns that succeed, error patterns and resolutions. Store as actionable rules.
+
+#### 6. Agent skills and reusable procedures
+
+Multi-step procedures or tool chains that work reliably. Capture: skill name, trigger conditions, steps, and user-specific constraints. When a request matches a stored skill, follow the procedure and adapt as needed. Update if the user refines the process.
+
+### What NOT to store
+
+Greetings, small talk, generic questions, trivial or ephemeral details, information already in memory, bulky working data (use short-term memory), raw transcripts (extract the insight, discard the noise).
+
+### When to search
+
+Before answering questions touching the user's background, preferences, projects, or past decisions — and the answer is not in recalled context — search with `find_memories`. Better to search and find nothing than to miss relevant context.
+
+### Short-term memory
+
+Use short-term memory (Fileshed / `shed_*`) for drafts, scratch notes, intermediate results, working code, research notes, data tables, and API responses. When an artifact crystallizes into a durable fact, decision, or reusable skill, promote to long-term memory with `add_memory`.
+```
 
 ---
 
-### Memory integration checklist
+## Integration Checklist
 
-<!-- Remove this section from your final prompt — it is a guide for prompt authors. -->
+Before deploying, verify:
 
-Before deploying your prompt, verify:
-
-- [ ] Long-term memory tools (`add_memory`, `search_memories`, `find_memories`) are available to the agent
-- [ ] Short-term memory tools (`shed_*` or equivalent) are available to the agent
-- [ ] The recall pipeline injects relevant memories into conversation context
+- [ ] **Part A** is in the agent's system prompt
+- [ ] **Part B** has been stored in mnemory as a pinned procedural memory (one-time setup)
+- [ ] Long-term memory tools (`add_memory`, `search_memories`, `find_memories`) are available
+- [ ] Short-term memory tools (`shed_*` or equivalent) are available, or that paragraph is removed from Part A
+- [ ] The recall pipeline injects pinned/core memories at conversation start
 - [ ] The agent's persona section does not contradict memory instructions
-- [ ] Placeholder comments (`<!-- ... -->`) have been removed or adapted
