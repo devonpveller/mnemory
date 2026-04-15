@@ -28,6 +28,28 @@ services:
       retries: 3
       start_period: 60s
 
+  mnemory-backup:
+    image: alpine:3.21
+    container_name: mnemory-backup
+    volumes:
+      - mnemory-data:/data:ro
+      - ./backups:/backups
+      - ./backup/backup.sh:/scripts/backup.sh:ro
+    environment:
+      - BACKUP_DIR=/backups
+      - DATA_DIR=/data
+      - RETAIN_DAYS=${BACKUP_RETAIN_DAYS:-7}
+      - BACKUP_CRON=${BACKUP_CRON:-0 2 * * *}
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        chmod +x /scripts/backup.sh
+        echo "$${BACKUP_CRON} /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
+        echo "[$(date -u +%FT%TZ)] Backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_DAYS} days)"
+        crond -f -l 2
+    restart: unless-stopped
+
 volumes:
   mnemory-data:
 
