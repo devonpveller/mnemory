@@ -34,9 +34,30 @@ class Tools:
             default=30,
             description="HTTP request timeout in seconds",
         )
+        debug: bool = Field(
+            default=False,
+            description=(
+                "Emit detailed debug info as chat status messages. "
+                "Shows request URL, payload, response status, result counts, "
+                "and error details for every API call."
+            ),
+        )
 
     def __init__(self):
         self.valves = self.Valves()
+
+    async def _debug(
+        self, emitter: Callable | None, msg: str
+    ) -> None:
+        """Emit a debug status message if debug mode is on."""
+        if not self.valves.debug or not emitter:
+            return
+        await emitter(
+            {
+                "type": "status",
+                "data": {"description": f"[mnemory debug] {msg}", "done": True},
+            }
+        )
 
     def _headers(self, user: dict) -> dict:
         """Build request headers with auth and identity."""
@@ -54,8 +75,10 @@ class Tools:
         path: str,
         payload: dict,
         user: dict,
+        emitter: Callable | None = None,
     ) -> dict:
         """POST to mnemory REST API. Returns parsed JSON or error dict."""
+        await self._debug(emitter, f"POST {path} payload={json.dumps(payload)[:200]}")
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -66,11 +89,14 @@ class Tools:
                 ) as resp:
                     body = await resp.json()
                     if resp.status == 200:
+                        await self._debug(emitter, f"POST {path} -> 200 OK")
                         return body
                     detail = body.get("detail", resp.reason)
+                    await self._debug(emitter, f"POST {path} -> {resp.status}: {detail}")
                     return {"error": True, "status": resp.status, "detail": str(detail)}
         except Exception as exc:
             _log.exception("mnemory API error: %s %s", path, exc)
+            await self._debug(emitter, f"POST {path} EXCEPTION: {exc}")
             return {"error": True, "message": f"Connection error: {exc}"}
 
     async def _put(
@@ -78,8 +104,10 @@ class Tools:
         path: str,
         payload: dict,
         user: dict,
+        emitter: Callable | None = None,
     ) -> dict:
         """PUT to mnemory REST API."""
+        await self._debug(emitter, f"PUT {path} payload={json.dumps(payload)[:200]}")
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.put(
@@ -90,19 +118,24 @@ class Tools:
                 ) as resp:
                     body = await resp.json()
                     if resp.status == 200:
+                        await self._debug(emitter, f"PUT {path} -> 200 OK")
                         return body
                     detail = body.get("detail", resp.reason)
+                    await self._debug(emitter, f"PUT {path} -> {resp.status}: {detail}")
                     return {"error": True, "status": resp.status, "detail": str(detail)}
         except Exception as exc:
             _log.exception("mnemory API error: %s %s", path, exc)
+            await self._debug(emitter, f"PUT {path} EXCEPTION: {exc}")
             return {"error": True, "message": f"Connection error: {exc}"}
 
     async def _delete(
         self,
         path: str,
         user: dict,
+        emitter: Callable | None = None,
     ) -> dict:
         """DELETE to mnemory REST API."""
+        await self._debug(emitter, f"DELETE {path}")
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.delete(
@@ -112,11 +145,14 @@ class Tools:
                 ) as resp:
                     body = await resp.json()
                     if resp.status == 200:
+                        await self._debug(emitter, f"DELETE {path} -> 200 OK")
                         return body
                     detail = body.get("detail", resp.reason)
+                    await self._debug(emitter, f"DELETE {path} -> {resp.status}: {detail}")
                     return {"error": True, "status": resp.status, "detail": str(detail)}
         except Exception as exc:
             _log.exception("mnemory API error: %s %s", path, exc)
+            await self._debug(emitter, f"DELETE {path} EXCEPTION: {exc}")
             return {"error": True, "message": f"Connection error: {exc}"}
 
     # ── Tool: remember ────────────────────────────────────────────────
@@ -153,7 +189,8 @@ class Tools:
                 {"type": "status", "data": {"description": "Storing memory...", "done": False}}
             )
 
-        result = await self._post("/api/memories", {"content": content}, __user__)
+        await self._debug(__event_emitter__, f"remember: content={content[:100]}...")
+        result = await self._post("/api/memories", {"content": content}, __user__, __event_emitter__)
 
         if __event_emitter__:
             if result.get("error"):
@@ -165,6 +202,7 @@ class Tools:
                 {"type": "status", "data": {"description": desc, "done": True}}
             )
 
+        await self._debug(__event_emitter__, f"remember result: {json.dumps(result, default=str)[:300]}")
         return json.dumps(result, default=str)
 
     # ── Tool: search_memory ───────────────────────────────────────────
@@ -195,10 +233,12 @@ class Tools:
                 {"type": "status", "data": {"description": "Searching memories...", "done": False}}
             )
 
+        await self._debug(__event_emitter__, f"search_memory: query={query[:100]}")
         result = await self._post(
             "/api/memories/search",
             {"query": query, "limit": 10},
             __user__,
+            __event_emitter__,
         )
 
         if __event_emitter__:
@@ -211,6 +251,7 @@ class Tools:
                 {"type": "status", "data": {"description": desc, "done": True}}
             )
 
+        await self._debug(__event_emitter__, f"search_memory result count: {len(result.get('results', []))}")
         return json.dumps(result, default=str)
 
     # ── Tool: find_memory ─────────────────────────────────────────────
@@ -244,10 +285,12 @@ class Tools:
                 {"type": "status", "data": {"description": "Deep searching memories...", "done": False}}
             )
 
+        await self._debug(__event_emitter__, f"find_memory: question={question[:100]}")
         result = await self._post(
             "/api/memories/find",
             {"question": question, "limit": 10},
             __user__,
+            __event_emitter__,
         )
 
         if __event_emitter__:
@@ -260,6 +303,7 @@ class Tools:
                 {"type": "status", "data": {"description": desc, "done": True}}
             )
 
+        await self._debug(__event_emitter__, f"find_memory result count: {len(result.get('results', []))}")
         return json.dumps(result, default=str)
 
     # ── Tool: update_memory ───────────────────────────────────────────
@@ -294,10 +338,12 @@ class Tools:
                 {"type": "status", "data": {"description": "Updating memory...", "done": False}}
             )
 
+        await self._debug(__event_emitter__, f"update_memory: id={memory_id}")
         result = await self._put(
             f"/api/memories/{memory_id}",
             {"content": content},
             __user__,
+            __event_emitter__,
         )
 
         if __event_emitter__:
@@ -335,9 +381,11 @@ class Tools:
                 {"type": "status", "data": {"description": "Deleting memory...", "done": False}}
             )
 
+        await self._debug(__event_emitter__, f"delete_memory: id={memory_id}")
         result = await self._delete(
             f"/api/memories/{memory_id}",
             __user__,
+            __event_emitter__,
         )
 
         if __event_emitter__:
