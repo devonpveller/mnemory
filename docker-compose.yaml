@@ -7,8 +7,9 @@ services:
       - "8051:8051"
     environment:
       - LLM_API_KEY=ollama
-      - LLM_BASE_URL=http://openwebui:11434/v1
-      - LLM_MODEL=gpt-oss:20b
+      # - LLM_BASE_URL=http://openwebui:11434/v1
+      - LLM_BASE_URL=http://169.254.83.107:5506/v1
+      - LLM_MODEL=gemma-4-e4b
       - EMBED_BASE_URL=http://openwebui:11434/v1
       - EMBED_MODEL=qllama/bge-m3:latest
       - EMBED_DIMS=1024
