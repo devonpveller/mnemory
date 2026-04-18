@@ -311,16 +311,31 @@ class LLMClient:
 
 
 def _clean_response(text: str) -> str:
-    """Strip markdown code fences and <think> blocks from LLM output.
+    """Strip markdown code fences, <think> blocks, and XML wrapper tags.
 
-    Some models (DeepSeek, etc.) wrap JSON in ```json...``` blocks or
-    include <think>...</think> reasoning blocks. Strip these to get
-    clean JSON.
+    Various models wrap JSON output in non-JSON content:
+    - DeepSeek/Qwen: <think>...</think> reasoning blocks
+    - Qwen (unclosed): <think>... without closing tag
+    - Some models: XML wrapper tags like <output>, <response>, etc.
+    - Many models: ```json...``` markdown code fences
     """
-    # Remove <think>...</think> blocks (DeepSeek reasoning)
+    # Remove <think>...</think> blocks (closed tags, non-greedy)
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
 
-    # Remove markdown code fences
+    # Remove unclosed <think> blocks (Qwen3 via llama-cpp may not close them)
+    text = re.sub(r"<think>.*", "", text, flags=re.DOTALL)
+
+    # Remove generic XML wrapper tags around content (e.g., <output>...</output>,
+    # <response>...</response>, <result>...</result>). Only strip if tag pair
+    # wraps the entire (trimmed) text.
+    text = text.strip()
+    wrapper_match = re.match(
+        r"^<([a-zA-Z_][a-zA-Z0-9_]*)>\s*(.*?)\s*</\1>$", text, re.DOTALL
+    )
+    if wrapper_match:
+        text = wrapper_match.group(2)
+
+    # Remove markdown code fences (may appear after think block removal)
     text = text.strip()
     if text.startswith("```"):
         # Remove opening fence (with optional language tag)

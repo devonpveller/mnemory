@@ -40,6 +40,44 @@ class TestCleanResponse:
     def test_empty_string(self):
         assert _clean_response("") == ""
 
+    def test_strips_unclosed_think_block(self):
+        """Qwen3 via llama-cpp may not close <think> tags."""
+        text = '<think>reasoning without end tag\n{"key": "value"}'
+        assert _clean_response(text) == ""
+
+    def test_unclosed_think_before_json(self):
+        """Unclosed think followed by JSON on separate block."""
+        text = '<think>some reasoning</think>extra\n<think>unclosed'
+        result = _clean_response(text)
+        assert "<think>" not in result
+
+    def test_strips_xml_output_wrapper(self):
+        """Some models wrap JSON in <output>...</output> tags."""
+        text = '<output>{"key": "value"}</output>'
+        assert _clean_response(text) == '{"key": "value"}'
+
+    def test_strips_xml_response_wrapper(self):
+        text = '<response>\n{"key": "value"}\n</response>'
+        assert _clean_response(text) == '{"key": "value"}'
+
+    def test_strips_xml_result_wrapper(self):
+        text = '<result>{"key": "value"}</result>'
+        assert _clean_response(text) == '{"key": "value"}'
+
+    def test_does_not_strip_mismatched_xml_tags(self):
+        """Mismatched tags should not be stripped."""
+        text = '<output>{"key": "value"}</response>'
+        assert _clean_response(text) == text
+
+    def test_think_block_then_code_fence(self):
+        """Think block followed by markdown fence should both be stripped."""
+        text = '<think>reasoning</think>\n```json\n{"key": "value"}\n```'
+        assert _clean_response(text) == '{"key": "value"}'
+
+    def test_xml_wrapper_with_code_fence_inside(self):
+        text = '<output>```json\n{"key": "value"}\n```</output>'
+        assert _clean_response(text) == '{"key": "value"}'
+
 
 # ── parse_json_response ──────────────────────────────────────────────
 
@@ -76,6 +114,16 @@ class TestParseJsonResponse:
 
     def test_json_with_think_block(self):
         text = '<think>reasoning</think>{"key": "value"}'
+        result = parse_json_response(text)
+        assert result == {"key": "value"}
+
+    def test_json_in_xml_wrapper(self):
+        text = '<output>{"memories": [{"text": "hello"}]}</output>'
+        result = parse_json_response(text)
+        assert "memories" in result
+
+    def test_json_in_xml_with_think_block(self):
+        text = '<think>long reasoning</think>\n<output>{"key": "value"}</output>'
         result = parse_json_response(text)
         assert result == {"key": "value"}
 
