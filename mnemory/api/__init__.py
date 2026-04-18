@@ -7,12 +7,16 @@ at /api/openapi.json and Swagger UI at /api/docs.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from mnemory import __version__
 from mnemory.session import SessionStore
+
+logger = logging.getLogger("mnemory")
 
 # Module-level session store — shared across all API endpoints.
 # Initialized with defaults; reconfigured in create_api_app() from config.
@@ -118,6 +122,17 @@ def create_api_app() -> FastAPI:
         docs_url="/docs",
         openapi_url="/openapi.json",
     )
+
+    @app.exception_handler(Exception)
+    async def _unhandled_exception_handler(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
+        """Return JSON for unhandled exceptions instead of plain-text 500."""
+        logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Internal server error"},
+        )
 
     from mnemory.api.auth import router as auth_router
     from mnemory.api.fsck import router as fsck_router

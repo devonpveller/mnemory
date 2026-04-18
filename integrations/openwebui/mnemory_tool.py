@@ -46,6 +46,23 @@ class Tools:
     def __init__(self):
         self.valves = self.Valves()
 
+    @staticmethod
+    def _format_error(result: dict, operation: str) -> str:
+        """Format an error result into a clear message the LLM will relay.
+
+        Returns a plain-English error string that tells the LLM the
+        operation failed and what went wrong, so it informs the user
+        instead of silently ignoring the failure.
+        """
+        detail = result.get("detail") or result.get("message") or "unknown error"
+        status = result.get("status", "")
+        status_hint = f" (HTTP {status})" if status else ""
+        return (
+            f"ERROR: {operation} failed{status_hint}. "
+            f"Reason: {detail}. "
+            f"Tell the user this operation failed and suggest retrying."
+        )
+
     async def _debug(
         self, emitter: Callable | None, msg: str
     ) -> None:
@@ -87,11 +104,16 @@ class Tools:
                     json=payload,
                     timeout=aiohttp.ClientTimeout(total=self.valves.request_timeout),
                 ) as resp:
-                    body = await resp.json()
                     if resp.status == 200:
+                        body = await resp.json()
                         await self._debug(emitter, f"POST {path} -> 200 OK")
                         return body
-                    detail = body.get("detail", resp.reason)
+                    # Try to parse error detail from JSON, fall back to text
+                    try:
+                        body = await resp.json()
+                        detail = body.get("detail", resp.reason)
+                    except Exception:
+                        detail = (await resp.text())[:200] or resp.reason
                     await self._debug(emitter, f"POST {path} -> {resp.status}: {detail}")
                     return {"error": True, "status": resp.status, "detail": str(detail)}
         except Exception as exc:
@@ -116,11 +138,15 @@ class Tools:
                     json=payload,
                     timeout=aiohttp.ClientTimeout(total=self.valves.request_timeout),
                 ) as resp:
-                    body = await resp.json()
                     if resp.status == 200:
+                        body = await resp.json()
                         await self._debug(emitter, f"PUT {path} -> 200 OK")
                         return body
-                    detail = body.get("detail", resp.reason)
+                    try:
+                        body = await resp.json()
+                        detail = body.get("detail", resp.reason)
+                    except Exception:
+                        detail = (await resp.text())[:200] or resp.reason
                     await self._debug(emitter, f"PUT {path} -> {resp.status}: {detail}")
                     return {"error": True, "status": resp.status, "detail": str(detail)}
         except Exception as exc:
@@ -143,11 +169,15 @@ class Tools:
                     headers=self._headers(user),
                     timeout=aiohttp.ClientTimeout(total=self.valves.request_timeout),
                 ) as resp:
-                    body = await resp.json()
                     if resp.status == 200:
+                        body = await resp.json()
                         await self._debug(emitter, f"DELETE {path} -> 200 OK")
                         return body
-                    detail = body.get("detail", resp.reason)
+                    try:
+                        body = await resp.json()
+                        detail = body.get("detail", resp.reason)
+                    except Exception:
+                        detail = (await resp.text())[:200] or resp.reason
                     await self._debug(emitter, f"DELETE {path} -> {resp.status}: {detail}")
                     return {"error": True, "status": resp.status, "detail": str(detail)}
         except Exception as exc:
@@ -203,6 +233,8 @@ class Tools:
             )
 
         await self._debug(__event_emitter__, f"remember result: {json.dumps(result, default=str)[:300]}")
+        if result.get("error"):
+            return self._format_error(result, "Storing memory")
         return json.dumps(result, default=str)
 
     # ── Tool: search_memory ───────────────────────────────────────────
@@ -252,6 +284,8 @@ class Tools:
             )
 
         await self._debug(__event_emitter__, f"search_memory result count: {len(result.get('results', []))}")
+        if result.get("error"):
+            return self._format_error(result, "Searching memories")
         return json.dumps(result, default=str)
 
     # ── Tool: find_memory ─────────────────────────────────────────────
@@ -304,6 +338,8 @@ class Tools:
             )
 
         await self._debug(__event_emitter__, f"find_memory result count: {len(result.get('results', []))}")
+        if result.get("error"):
+            return self._format_error(result, "Deep searching memories")
         return json.dumps(result, default=str)
 
     # ── Tool: update_memory ───────────────────────────────────────────
@@ -355,6 +391,8 @@ class Tools:
                 {"type": "status", "data": {"description": desc, "done": True}}
             )
 
+        if result.get("error"):
+            return self._format_error(result, "Updating memory")
         return json.dumps(result, default=str)
 
     # ── Tool: delete_memory ───────────────────────────────────────────
@@ -397,4 +435,6 @@ class Tools:
                 {"type": "status", "data": {"description": desc, "done": True}}
             )
 
+        if result.get("error"):
+            return self._format_error(result, "Deleting memory")
         return json.dumps(result, default=str)
