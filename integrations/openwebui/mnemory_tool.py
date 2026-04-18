@@ -34,6 +34,13 @@ class Tools:
             default=30,
             description="HTTP request timeout in seconds",
         )
+        search_limit: int = Field(
+            default=5,
+            description=(
+                "Max memories to return from search/find. Lower values "
+                "reduce context usage for smaller models. Range: 1-20."
+            ),
+        )
         debug: bool = Field(
             default=False,
             description=(
@@ -48,20 +55,54 @@ class Tools:
 
     @staticmethod
     def _format_error(result: dict, operation: str) -> str:
-        """Format an error result into a clear message the LLM will relay.
+        """Format an error result as JSON with a clear error message.
 
-        Returns a plain-English error string that tells the LLM the
-        operation failed and what went wrong, so it informs the user
-        instead of silently ignoring the failure.
+        Returns structured JSON that matches the normal return format
+        but with an obvious error field, so the LLM treats it as data
+        and continues its execution plan.
         """
         detail = result.get("detail") or result.get("message") or "unknown error"
         status = result.get("status", "")
-        status_hint = f" (HTTP {status})" if status else ""
-        return (
-            f"ERROR: {operation} failed{status_hint}. "
-            f"Reason: {detail}. "
-            f"Tell the user this operation failed and suggest retrying."
-        )
+        return json.dumps({
+            "error": True,
+            "operation": operation,
+            "status": status,
+            "error_message": f"{operation} failed: {detail}",
+        })
+
+    @staticmethod
+    def _slim_results(result: dict) -> dict:
+        """Trim search/find results to only fields the LLM needs.
+
+        Full API responses include all metadata (timestamps, TTL, access
+        counts, artifacts, labels, scores, etc.) which floods the context
+        window of smaller models, causing them to exhaust their generation
+        budget on reasoning and stop before making further tool calls.
+
+        Keeps: id, memory text (truncated to 300 chars), memory_type,
+        categories, importance.
+        """
+        items = result.get("results")
+        if not isinstance(items, list):
+            return result
+        slim = []
+        for item in items:
+            text = item.get("memory", "")
+            if len(text) > 300:
+                text = text[:297] + "..."
+            entry: dict[str, Any] = {
+                "id": item.get("id", ""),
+                "memory": text,
+            }
+            meta = item.get("metadata") or {}
+            if meta.get("memory_type"):
+                entry["type"] = meta["memory_type"]
+            if meta.get("categories"):
+                entry["categories"] = meta["categories"]
+            if meta.get("importance") and meta["importance"] != "normal":
+                entry["importance"] = meta["importance"]
+            slim.append(entry)
+        return {"results": slim, "count": len(slim)}
 
     async def _debug(
         self, emitter: Callable | None, msg: str
@@ -235,7 +276,11 @@ class Tools:
         await self._debug(__event_emitter__, f"remember result: {json.dumps(result, default=str)[:300]}")
         if result.get("error"):
             return self._format_error(result, "Storing memory")
-        return json.dumps(result, default=str)
+        # Slim down: LLM only needs IDs and actions, not full metadata
+        slim = []
+        for r in result.get("results", []):
+            slim.append({"id": r.get("id", ""), "action": r.get("action", "ADD")})
+        return json.dumps({"results": slim, "count": len(slim)})
 
     # ── Tool: search_memory ───────────────────────────────────────────
 
@@ -268,7 +313,7 @@ class Tools:
         await self._debug(__event_emitter__, f"search_memory: query={query[:100]}")
         result = await self._post(
             "/api/memories/search",
-            {"query": query, "limit": 10},
+            {"query": query, "limit": min(self.valves.search_limit, 20)},
             __user__,
             __event_emitter__,
         )
@@ -286,7 +331,7 @@ class Tools:
         await self._debug(__event_emitter__, f"search_memory result count: {len(result.get('results', []))}")
         if result.get("error"):
             return self._format_error(result, "Searching memories")
-        return json.dumps(result, default=str)
+        return json.dumps(self._slim_results(result), default=str)
 
     # ── Tool: find_memory ─────────────────────────────────────────────
 
@@ -322,7 +367,7 @@ class Tools:
         await self._debug(__event_emitter__, f"find_memory: question={question[:100]}")
         result = await self._post(
             "/api/memories/find",
-            {"question": question, "limit": 10},
+            {"question": question, "limit": min(self.valves.search_limit, 20)},
             __user__,
             __event_emitter__,
         )
@@ -340,7 +385,7 @@ class Tools:
         await self._debug(__event_emitter__, f"find_memory result count: {len(result.get('results', []))}")
         if result.get("error"):
             return self._format_error(result, "Deep searching memories")
-        return json.dumps(result, default=str)
+        return json.dumps(self._slim_results(result), default=str)
 
     # ── Tool: update_memory ───────────────────────────────────────────
 
@@ -393,7 +438,7 @@ class Tools:
 
         if result.get("error"):
             return self._format_error(result, "Updating memory")
-        return json.dumps(result, default=str)
+        return json.dumps({"updated": True, "id": memory_id})
 
     # ── Tool: delete_memory ───────────────────────────────────────────
 
@@ -437,4 +482,4 @@ class Tools:
 
         if result.get("error"):
             return self._format_error(result, "Deleting memory")
-        return json.dumps(result, default=str)
+        return json.dumps({"deleted": True, "id": memory_id})

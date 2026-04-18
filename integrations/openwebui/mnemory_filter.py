@@ -65,6 +65,16 @@ class Filter:
                 "Prevents context bloat from weak matches on follow-up messages."
             ),
         )
+        skip_recall_with_tools: bool = Field(
+            default=False,
+            description=(
+                "Skip dynamic memory recall on follow-up turns when mnemory "
+                "search tools (search_memory, find_memory) are available. "
+                "The model searches explicitly via tools instead. Reduces "
+                "duplicate context for smaller models. Static context "
+                "(instructions + core memories) is always injected."
+            ),
+        )
         show_status: bool = Field(
             default=True,
             description="Show memory status messages in chat (can be overridden per-user)",
@@ -111,6 +121,13 @@ class Filter:
         "initialize_memory",
         "get_core_memories",
         "get_recent_memories",
+    }
+
+    # Mnemory search tools — when present, the filter can skip its own
+    # dynamic recall so the model searches explicitly via tool calls.
+    _SEARCH_TOOL_SUFFIXES = {
+        "search_memory",
+        "find_memory",
     }
 
     def __init__(self):
@@ -175,6 +192,22 @@ class Filter:
         except Exception as exc:
             await self._debug(emitter, f"API {path} error: {exc}")
             return None  # Graceful degradation
+
+    def _has_search_tools(self, body: dict) -> bool:
+        """Check if mnemory search tools are in the request."""
+        for t in body.get("tool_ids", []):
+            if isinstance(t, str) and any(
+                t.endswith(s) for s in self._SEARCH_TOOL_SUFFIXES
+            ):
+                return True
+        for t in body.get("tools", []):
+            if isinstance(t, dict):
+                name = self._tool_name(t)
+                if name and any(
+                    name.endswith(s) for s in self._SEARCH_TOOL_SUFFIXES
+                ):
+                    return True
+        return False
 
     def _strip_managed_tools(
         self, body: dict, emitter: Callable | None = None
@@ -429,6 +462,31 @@ class Filter:
         # memory instructions and core memories.
         if not is_first and self.valves.recall_mode == "first_only":
             self._inject_static_context(body, sess)
+            return body
+
+        # When search tools handle dynamic recall, skip the filter's
+        # own search on follow-up turns.  The first turn always runs
+        # recall to populate the static context cache.
+        if (
+            not is_first
+            and self.valves.skip_recall_with_tools
+            and self._has_search_tools(body)
+        ):
+            await self._debug(
+                __event_emitter__,
+                "Skipping dynamic recall (search tools present)",
+            )
+            self._inject_static_context(body, sess)
+            if __event_emitter__ and show_status:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "Memory ready (tools active)",
+                            "done": True,
+                        },
+                    }
+                )
             return body
 
         # Extract query from last user message
