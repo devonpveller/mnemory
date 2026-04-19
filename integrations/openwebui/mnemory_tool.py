@@ -43,7 +43,7 @@ class Tools:
             ),
         )
         max_search_calls_per_turn: int = Field(
-            default=2,
+            default=1,
             description=(
                 "Maximum search/find tool calls allowed within a short "
                 "time window (30s). Prevents smaller models from looping "

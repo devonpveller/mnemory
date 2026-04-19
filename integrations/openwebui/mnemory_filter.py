@@ -111,6 +111,16 @@ class Filter:
                 "remember, update_memory, and delete_memory."
             ),
         )
+        disable_thinking: bool = Field(
+            default=False,
+            description=(
+                "Append /no_think to each user message before sending to "
+                "the LLM. Required for Qwen3 models that waste their entire "
+                "output budget on hidden chain-of-thought reasoning, leaving "
+                "no tokens for the visible response. The tag must be in the "
+                "user message (not system prompt) to take effect."
+            ),
+        )
 
     class UserValves(BaseModel):
         enabled: bool = Field(
@@ -674,6 +684,11 @@ class Filter:
         # the static context (often 1-2k tokens) is cached instead of
         # being re-processed on every turn.
 
+        # Move /no_think from system prompt to last user message
+        # so Qwen3 models actually honor it.
+        if self.valves.move_no_think:
+            self._move_no_think(body)
+
         # 1. Static context — always inject from cache
         has_static = sess and bool(sess.get("static_ctx"))
         self._inject_static_context(body, sess)
@@ -735,6 +750,30 @@ class Filter:
                 "content": sess["static_ctx"],
             },
         )
+
+    @staticmethod
+    def _move_no_think(body: dict) -> None:
+        """Move /no_think from system messages to the last user message.
+
+        Qwen3 only honors /no_think when it appears in a user message,
+        not in the system prompt.  This lets each agent opt in by
+        placing /no_think in its system prompt.
+        """
+        messages = body.get("messages", [])
+        found = False
+        for msg in messages:
+            if msg.get("role") == "system":
+                content = msg.get("content", "")
+                if "/no_think" in content:
+                    msg["content"] = content.replace("/no_think", "").strip()
+                    found = True
+        if found:
+            for msg in reversed(messages):
+                if msg.get("role") == "user":
+                    content = msg.get("content", "")
+                    if "/no_think" not in content:
+                        msg["content"] = content + " /no_think"
+                    break
 
     @staticmethod
     def _build_status(result: dict | None, is_first: bool) -> str:
