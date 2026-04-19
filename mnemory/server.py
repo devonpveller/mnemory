@@ -211,6 +211,7 @@ def _get_fsck_service():
                 api_key=cfg.llm.api_key,
                 temperature=cfg.llm.temperature,
                 reasoning_effort=cfg.llm.reasoning_effort,
+                context_size=cfg.llm.context_size,
             )
             fsck_llm = LLMClient(fsck_llm_config)
         else:
@@ -2131,6 +2132,7 @@ async def lifespan(app):
             api_key=cfg.llm.api_key,
             temperature=cfg.llm.temperature,
             reasoning_effort=consolidation_reasoning,
+            context_size=cfg.llm.context_size,
         )
         consolidation_llm = LLMClient(consolidation_llm_config)
         logger.info(

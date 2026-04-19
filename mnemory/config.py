@@ -123,6 +123,12 @@ class LLMConfig:
     reasoning_effort: str | None = field(
         default_factory=lambda: _env("LLM_REASONING_EFFORT") or None
     )
+    # Maximum context window size in tokens. When set (> 0), the LLM client
+    # truncates the user message and caps max_tokens to fit within this limit.
+    # Set to match your model's context size (e.g., 8192). 0 = no limit.
+    context_size: int = field(
+        default_factory=lambda: _env_int("LLM_CONTEXT_SIZE", 0)
+    )
 
 
 @dataclass

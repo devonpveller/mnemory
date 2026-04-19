@@ -12,13 +12,14 @@ services:
       - LLM_BASE_URL=http://llama-cpp-embed:8080/v1
       - LLM_MODEL=Qwen3.6-35B-A3B-Q4_K_M.gguf
       # - EMBED_BASE_URL=http://openwebui:11434/v1
-      - EMBED_BASE_URL=http://openwebui:11434/v1
+      - EMBED_BASE_URL=http://llama-cpp-embed:8080/v1
       - EMBED_MODEL=qllama/bge-m3:latest
       - EMBED_DIMS=1024
       - MCP_API_KEY=${MCP_API_KEY}
       - MCP_API_KEYS=${MCP_API_KEYS}
       - FIND_LLM_MODEL=gpt-oss:20b
       - FIND_MEMORIES_QUERIES=3
+      - LLM_CONTEXT_SIZE=8192
       - MGMT_PORT=8051
     volumes:
       - mnemory-data:/data

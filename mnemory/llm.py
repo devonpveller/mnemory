@@ -35,6 +35,7 @@ class LLMClient:
         self._model = config.model
         self._temperature = config.temperature
         self._reasoning_effort = config.reasoning_effort
+        self._context_size = config.context_size
         self._supports_structured: bool | None = None
         # Tracks unsupported parameters for this model/provider.
         # Maps param name -> fix action. Populated on first BadRequestError.
@@ -70,6 +71,9 @@ class LLMClient:
         temp = temperature if temperature is not None else self._temperature
 
         t0 = time.monotonic()
+
+        # Truncate messages and cap max_tokens to fit context window
+        messages, max_tokens = self._fit_context(messages, max_tokens)
 
         if json_schema and self._supports_structured is not False:
             try:
@@ -123,6 +127,85 @@ class LLMClient:
         collector = get_collector()
         if collector:
             collector.observe_llm_duration(operation, self._model, duration)
+
+    # Conservative chars-per-token ratio for budget estimation.
+    # Under-estimates tokens (errs on the side of truncating more)
+    # to avoid sending prompts that exceed the context window.
+    # Real-world ratios vary (2.5-4.0 depending on language/content);
+    # we use a low value to be safe with all tokenizers.
+    _CHARS_PER_TOKEN = 2.4
+
+    # Minimum tokens reserved for generation output, even when the
+    # caller requests fewer.  Ensures the prompt doesn't fill the
+    # context so tightly that the backend refuses to generate.
+    _MIN_OUTPUT_RESERVE = 512
+
+    def _fit_context(
+        self,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+    ) -> tuple[list[dict[str, str]], int]:
+        """Truncate messages and cap max_tokens to fit the context window.
+
+        When ``context_size`` is configured, estimates the total token count
+        of all messages, reserves space for generation (``max_tokens``), and
+        truncates the **last user message** if the input exceeds the budget.
+        System messages are never truncated (they contain output format rules).
+
+        Returns:
+            (messages, max_tokens) — possibly modified copies.
+        """
+        if not self._context_size:
+            return messages, max_tokens
+
+        cpt = self._CHARS_PER_TOKEN
+
+        # Estimate input tokens from all messages
+        total_chars = sum(len(m.get("content", "")) for m in messages)
+        input_tokens_est = int(total_chars / cpt)
+
+        # Reserve enough output tokens: at least _MIN_OUTPUT_RESERVE, but no
+        # more than what the caller requested or the full context.
+        output_reserve = min(
+            max_tokens,
+            max(self._MIN_OUTPUT_RESERVE, self._context_size // 4),
+        )
+        max_output = min(max_tokens, max(output_reserve, self._context_size - input_tokens_est))
+
+        input_budget_tokens = self._context_size - output_reserve
+        input_budget_chars = int(input_budget_tokens * cpt)
+
+        if total_chars <= input_budget_chars:
+            return messages, max_output
+
+        # Need to truncate — find the last user message
+        messages = [m.copy() for m in messages]
+        non_user_chars = sum(
+            len(m.get("content", "")) for m in messages if m["role"] != "user"
+        )
+        user_budget_chars = max(0, input_budget_chars - non_user_chars)
+
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i]["role"] == "user":
+                content = messages[i]["content"]
+                if len(content) > user_budget_chars:
+                    messages[i] = {
+                        **messages[i],
+                        "content": content[:user_budget_chars] + "\n\n[TRUNCATED]",
+                    }
+                    truncated_tokens = int(len(content) / cpt) - int(
+                        user_budget_chars / cpt
+                    )
+                    logger.warning(
+                        "Context truncation: trimmed last user message by ~%d tokens "
+                        "to fit %d-token context (output_reserve=%d)",
+                        truncated_tokens,
+                        self._context_size,
+                        output_reserve,
+                    )
+                break
+
+        return messages, max_output
 
     def _call(
         self,

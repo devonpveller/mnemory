@@ -362,6 +362,7 @@ class MemoryService:
                     api_key=config.llm.api_key,
                     temperature=config.llm.temperature,
                     reasoning_effort=config.memory.find_reasoning_effort,
+                    context_size=config.llm.context_size,
                 )
             )
         elif config.memory.find_reasoning_effort != config.llm.reasoning_effort:
@@ -374,6 +375,7 @@ class MemoryService:
                     api_key=config.llm.api_key,
                     temperature=config.llm.temperature,
                     reasoning_effort=config.memory.find_reasoning_effort,
+                    context_size=config.llm.context_size,
                 )
             )
         else:
