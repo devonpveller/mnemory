@@ -8,6 +8,7 @@ license: Apache-2.0
 
 import json
 import logging
+import time
 from typing import Any, Callable, Optional
 
 import aiohttp
@@ -41,6 +42,16 @@ class Tools:
                 "reduce context usage for smaller models. Range: 1-20."
             ),
         )
+        max_search_calls_per_turn: int = Field(
+            default=2,
+            description=(
+                "Maximum search/find tool calls allowed within a short "
+                "time window (30s). Prevents smaller models from looping "
+                "on search calls and exhausting their output budget. "
+                "Set to 0 to disable the limit."
+            ),
+        )
+
         debug: bool = Field(
             default=False,
             description=(
@@ -52,6 +63,53 @@ class Tools:
 
     def __init__(self):
         self.valves = self.Valves()
+        # Per-user search call tracker: {user_id: [(timestamp, ...), ...]}
+        # Used to rate-limit search/find calls within a turn.
+        self._search_calls: dict[str, list[float]] = {}
+
+    def _check_search_limit(self, user: dict) -> str | None:
+        """Check if the user has exceeded the search call limit.
+
+        Returns a JSON string to return to the model if rate-limited,
+        or None if the call should proceed.
+        """
+        limit = self.valves.max_search_calls_per_turn
+        if limit <= 0:
+            return None
+
+        user_id = user.get("email", user.get("id", ""))
+        if not user_id:
+            return None
+
+        now = time.monotonic()
+        window = 30.0  # seconds
+
+        # Clean old entries
+        calls = self._search_calls.get(user_id, [])
+        calls = [t for t in calls if now - t < window]
+
+        if len(calls) >= limit:
+            self._search_calls[user_id] = calls
+            return json.dumps({
+                "results": [],
+                "message": (
+                    "You have already searched memory this turn. "
+                    "Use the results you already have and respond "
+                    "to the user now. Do NOT search again."
+                ),
+            })
+
+        calls.append(now)
+        self._search_calls[user_id] = calls
+
+        # Evict stale users periodically
+        if len(self._search_calls) > 200:
+            self._search_calls = {
+                k: v for k, v in self._search_calls.items()
+                if v and now - v[-1] < window
+            }
+
+        return None
 
     @staticmethod
     def _format_error(result: dict, operation: str) -> str:
@@ -68,6 +126,7 @@ class Tools:
             "operation": operation,
             "status": status,
             "error_message": f"{operation} failed: {detail}",
+            "instruction": "Do NOT retry this call. Respond to the user with what you already know.",
         })
 
     @staticmethod
@@ -290,20 +349,20 @@ class Tools:
         __user__: dict = {},
         __event_emitter__: Optional[Callable] = None,
     ) -> str:
-        """Search memories using natural language. Use this to look up anything about the user.
-
-        You do NOT need exact names — describe what you're looking for naturally.
-        Examples: "what pets does the user have", "Tennessee utilities task",
-        "preferences for code style", "recent decisions about the project".
+        """Search memories by keyword. ONLY call this when the user explicitly asks you to look something up AND the answer is not already in the recalled memories injected into this conversation. Do NOT call proactively. Do NOT call more than once per turn. If this returns an error, do NOT retry — respond with what you know.
 
         Args:
             query: What to search for, in natural language.
 
         Returns:
-            List of matching memories with content, type, and metadata.
+            List of matching memories.
         """
         if not query or not query.strip():
             return json.dumps({"error": True, "message": "Query cannot be empty"})
+
+        limited = self._check_search_limit(__user__)
+        if limited:
+            return limited
 
         if __event_emitter__:
             await __event_emitter__(
@@ -341,14 +400,7 @@ class Tools:
         __user__: dict = {},
         __event_emitter__: Optional[Callable] = None,
     ) -> str:
-        """Deep search for memories using AI-powered multi-query expansion and reranking.
-
-        Use this for complex questions that need thorough searching across
-        related topics. Slower than search_memory (2 extra LLM calls) but
-        finds more relevant results by following associations.
-
-        Examples: "What do I know about the user's move to Tennessee?",
-        "Everything related to the user's work projects and deadlines".
+        """Deep search for a specific question ONLY when search_memory was not enough. Do NOT call this proactively. Do NOT call this if you already have the answer from recalled memories. Do NOT call both search_memory and find_memory for the same question. If this returns an error, do NOT retry — respond with what you know.
 
         Args:
             question: The question to answer, in natural language.
@@ -358,6 +410,10 @@ class Tools:
         """
         if not question or not question.strip():
             return json.dumps({"error": True, "message": "Question cannot be empty"})
+
+        limited = self._check_search_limit(__user__)
+        if limited:
+            return limited
 
         if __event_emitter__:
             await __event_emitter__(
@@ -371,6 +427,26 @@ class Tools:
             __user__,
             __event_emitter__,
         )
+
+        # On error, silently fall back to basic search (no LLM needed)
+        # so the model gets results instead of an error that triggers
+        # a retry loop.
+        if result.get("error"):
+            await self._debug(
+                __event_emitter__,
+                f"find_memory failed ({result.get('status', '?')}), "
+                f"falling back to search_memory",
+            )
+            if __event_emitter__:
+                await __event_emitter__(
+                    {"type": "status", "data": {"description": "Searching memories...", "done": False}}
+                )
+            result = await self._post(
+                "/api/memories/search",
+                {"query": question, "limit": min(self.valves.search_limit, 20)},
+                __user__,
+                __event_emitter__,
+            )
 
         if __event_emitter__:
             if result.get("error"):

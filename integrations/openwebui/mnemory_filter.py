@@ -99,6 +99,18 @@ class Filter:
                 "from the request to reduce prompt token usage."
             ),
         )
+        strip_search_tools: bool = Field(
+            default=False,
+            description=(
+                "Remove search_memory and find_memory tools from the request "
+                "when the filter already recalled memories for this turn. "
+                "Enable this if your model gets stuck in tool-call loops or "
+                "stops responding after calling search tools. The filter's "
+                "automatic recall already handles memory search — explicit "
+                "search tools are redundant. The model can still use "
+                "remember, update_memory, and delete_memory."
+            ),
+        )
 
     class UserValves(BaseModel):
         enabled: bool = Field(
@@ -256,6 +268,42 @@ class Filter:
         if name and any(name.endswith(s) for s in self._MANAGED_TOOL_SUFFIXES):
             return True
         return False
+
+    def _strip_tools_by_suffixes(
+        self, body: dict, suffixes: set[str]
+    ) -> list[str]:
+        """Remove tools matching any of the given name suffixes.
+
+        Works on both ``tool_ids`` (list[str]) and ``tools`` (list[dict]).
+        Returns list of stripped tool names for debug logging.
+        """
+        stripped: list[str] = []
+
+        tool_ids = body.get("tool_ids")
+        if tool_ids:
+            kept = []
+            for t in tool_ids:
+                if isinstance(t, str) and any(t.endswith(s) for s in suffixes):
+                    stripped.append(t)
+                else:
+                    kept.append(t)
+            body["tool_ids"] = kept
+
+        tools = body.get("tools")
+        if tools and isinstance(tools, list):
+            kept_tools = []
+            for t in tools:
+                if isinstance(t, dict):
+                    name = self._tool_name(t)
+                    if name and any(name.endswith(s) for s in suffixes):
+                        stripped.append(name)
+                    else:
+                        kept_tools.append(t)
+                else:
+                    kept_tools.append(t)
+            body["tools"] = kept_tools
+
+        return stripped
 
     @staticmethod
     def _tool_name(tool: dict) -> str:
@@ -426,6 +474,18 @@ class Filter:
                     __event_emitter__,
                     "No managed tools found to strip"
                     f" (tool_ids={body.get('tool_ids', 'absent')!r})",
+                )
+
+        # Strip search/find tools so the model cannot make redundant
+        # search calls after the filter already recalled memories.
+        if self.valves.strip_search_tools:
+            stripped_search = self._strip_tools_by_suffixes(
+                body, self._SEARCH_TOOL_SUFFIXES
+            )
+            if stripped_search:
+                await self._debug(
+                    __event_emitter__,
+                    f"Stripped search tools: {', '.join(stripped_search)}",
                 )
 
         chat_id = body.get("chat_id") or ""
