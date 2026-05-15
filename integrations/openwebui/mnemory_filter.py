@@ -7,6 +7,7 @@ version: 0.3.1
 
 import asyncio
 import logging
+import re
 from typing import Callable, Optional
 
 import aiohttp
@@ -32,6 +33,27 @@ class Filter:
         agent_id: str = Field(
             default="open-webui",
             description="Agent ID sent to mnemory",
+        )
+        cloud_zone_enabled: bool = Field(
+            default=True,
+            description=(
+                "Privacy-first model gating. When the selected model is "
+                "NOT confirmed local (see local_model_pattern), treat it "
+                "as a cloud service: never inject pinned/core or personal "
+                "memories; only recall memories labelled share=cloud, and "
+                "fail closed (inject nothing) if that restricted search "
+                "errors. Memories written from a cloud model are stamped "
+                "origin=cloud,share=cloud."
+            ),
+        )
+        local_model_pattern: str = Field(
+            default=r"(?i)\b(qwen|gemma|llama|phi|deepseek-r1|mistral-?7b|"
+                    r"mixtral|nomic|bge|granite|smollm|local)\b",
+            description=(
+                "Regex matching model IDs trusted as LOCAL (full memory "
+                "access). Anything that does NOT match is treated as a "
+                "cloud service (privacy-first default-deny on unknowns)."
+            ),
         )
         recall_mode: str = Field(
             default="always",
@@ -452,6 +474,18 @@ class Filter:
                 "population in Open WebUI."
             )
 
+    def _is_local_model(self, body: dict) -> bool:
+        """True only if the selected model id matches local_model_pattern.
+        Privacy-first: anything we cannot positively confirm as local is
+        treated as a cloud service."""
+        model = body.get("model")
+        if not isinstance(model, str) or not model:
+            return False  # unknown => cloud-restricted
+        try:
+            return re.search(self.valves.local_model_pattern, model) is not None
+        except re.error:
+            return False  # bad pattern => fail safe (cloud-restricted)
+
     # ── Inlet (before LLM) ───────────────────────────────────────────
 
     async def inlet(
@@ -597,24 +631,59 @@ class Filter:
         else:
             search_mode = self.valves.recall_search_mode
 
-        # Call recall endpoint
-        payload: dict = {
-            "session_id": session_id,
-            "query": query,
-            "search_mode": search_mode,
-            "score_threshold": self.valves.recall_score_threshold,
-        }
-        if is_first:
-            payload["include_instructions"] = True
-            payload["managed"] = True
+        # --- Cloud-zone gating (privacy-first) ---
+        # If the model is not confirmed local, never call /api/recall
+        # (it loads pinned/core incl. personal). Instead do a restricted
+        # search limited to share=cloud, and fail CLOSED on any error.
+        if self.valves.cloud_zone_enabled and not self._is_local_model(body):
+            await self._debug(
+                __event_emitter__,
+                f"CLOUD ZONE: model={body.get('model')!r} -> restricted "
+                f"recall (labels.share=cloud, no core/personal)",
+            )
+            result = None
+            try:
+                cloud = await self._post(
+                    "/api/memories/search",
+                    {"query": query, "limit": 8,
+                     "labels": {"share": "cloud"}},
+                    __user__, __event_emitter__,
+                )
+                if cloud is not None:
+                    hits = cloud.get("results", cloud) if isinstance(
+                        cloud, dict) else cloud
+                    result = {"search_results": [
+                        {"memory": h.get("memory") or h.get("content")}
+                        for h in (hits or [])
+                        if h.get("memory") or h.get("content")
+                    ]}
+            except Exception as exc:  # fail closed
+                await self._debug(
+                    __event_emitter__,
+                    f"CLOUD ZONE restricted search failed, injecting "
+                    f"nothing: {exc!r}",
+                )
+                result = None
+        else:
+            # Call recall endpoint (trusted/local model: full access)
+            payload: dict = {
+                "session_id": session_id,
+                "query": query,
+                "search_mode": search_mode,
+                "score_threshold": self.valves.recall_score_threshold,
+            }
+            if is_first:
+                payload["include_instructions"] = True
+                payload["managed"] = True
 
-        await self._debug(
-            __event_emitter__,
-            f"Calling /api/recall: mode={search_mode} "
-            f"session_id={session_id!r} is_first={is_first}",
-        )
+            await self._debug(
+                __event_emitter__,
+                f"Calling /api/recall: mode={search_mode} "
+                f"session_id={session_id!r} is_first={is_first}",
+            )
 
-        result = await self._post("/api/recall", payload, __user__, __event_emitter__)
+            result = await self._post(
+                "/api/recall", payload, __user__, __event_emitter__)
 
         if result:
             stats = result.get("stats", {})
@@ -862,10 +931,19 @@ class Filter:
         if context:
             payload["context"] = context
         # Attach labels for provenance tracking (chat_id links memories
-        # to a specific conversation, source identifies the client)
+        # to a specific conversation, source identifies the client).
+        # origin/share follow the privacy policy: a memory produced while
+        # talking to a cloud model is cloud-originated => shareable to all
+        # services. Local-model memories are origin=local with no share
+        # flag (cloud-invisible by default until the user elevates them).
         labels: dict[str, str] = {"source": "open-webui"}
         if chat_id:
             labels["chat_id"] = chat_id
+        if self.valves.cloud_zone_enabled and not self._is_local_model(body):
+            labels["origin"] = "cloud"
+            labels["share"] = "cloud"
+        else:
+            labels["origin"] = "local"
         payload["labels"] = labels
         asyncio.create_task(
             self._post("/api/remember", payload, __user__, __event_emitter__)
