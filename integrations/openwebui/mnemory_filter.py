@@ -72,19 +72,41 @@ class Filter:
             ),
         )
         recall_find_first: bool = Field(
-            default=True,
+            default=False,
             description=(
                 "When recall_search_mode is 'search', use 'find' for the "
                 "first message in a session (thorough initial context). "
+                "Default OFF (hybrid recall): the broad first-turn 'find' "
+                "is the main source of irrelevant start-of-chat memories. "
                 "Ignored when recall_search_mode is 'find'."
             ),
         )
         recall_score_threshold: float = Field(
-            default=0.5,
+            default=0.7,
             description=(
                 "Minimum relevance score (0.0-1.0) for recalled memories. "
                 "Higher = fewer but more relevant memories injected. "
-                "Prevents context bloat from weak matches on follow-up messages."
+                "Raised from 0.5 -> 0.7 for hybrid recall: inject only "
+                "high-confidence hits; the model uses search tools for the "
+                "rest."
+            ),
+        )
+        inject_epistemic_block: bool = Field(
+            default=True,
+            description=(
+                "Inject the cached epistemic-taxonomy instruction (guess / "
+                "educated guess / fact / stale-research, EV:research header "
+                "rules, active tool use). Teaches the model to actively "
+                "search/remember and to grade claim confidence."
+            ),
+        )
+        inject_core_memories: bool = Field(
+            default=False,
+            description=(
+                "Cache mnemory's pinned core memories into start-of-chat "
+                "context. Default OFF (hybrid): wholesale core dump was the "
+                "other source of start-of-chat noise; the model can "
+                "search_memory for identity/prefs when relevant."
             ),
         )
         skip_recall_with_tools: bool = Field(
@@ -133,16 +155,6 @@ class Filter:
                 "remember, update_memory, and delete_memory."
             ),
         )
-        disable_thinking: bool = Field(
-            default=False,
-            description=(
-                "Append /no_think to each user message before sending to "
-                "the LLM. Required for Qwen3 models that waste their entire "
-                "output budget on hidden chain-of-thought reasoning, leaving "
-                "no tokens for the visible response. The tag must be in the "
-                "user message (not system prompt) to take effect."
-            ),
-        )
 
     class UserValves(BaseModel):
         enabled: bool = Field(
@@ -173,6 +185,41 @@ class Filter:
         "search_memory",
         "find_memory",
     }
+
+    # Cached epistemic-taxonomy instruction. Injected at a stable early
+    # position every turn so it is part of the cacheable prompt prefix.
+    # Teaches confidence grading + active memory-tool use.
+    _EPISTEMIC_BLOCK = (
+        "## Memory & evidence protocol\n"
+        "You have mnemory tools (search_memory / find_memory / remember). "
+        "Use them proactively — do not wait to be asked:\n"
+        "- Before any substantive answer, decision, or code, call "
+        "search_memory (or find_memory for broad questions) with a focused "
+        "query. Better to search and find nothing than to miss context.\n"
+        "- When the user states a durable preference, decision, fact, or "
+        "project detail, call remember. Don't ask permission for routine "
+        "saves.\n\n"
+        "Grade every substantive claim by provenance and say which it is:\n"
+        "- **(guess)** — no supporting context or memory. State the "
+        "uncertainty plainly.\n"
+        "- **(educated guess)** — inferred from conversation context or a "
+        "non-research memory. Reasonable, not verified.\n"
+        "- **fact** — backed by a recalled memory whose content starts "
+        "with a `⟦EV:research …⟧` header AND is still fresh "
+        "(see below). State it directly and cite the header's sources / "
+        "the attached research artifact.\n\n"
+        "Reading the `⟦EV:research | date:YYYY-MM-DD | vol:<tier> | "
+        "revalidate:<N>d | src:<n> | …⟧` header on a recalled "
+        "memory: compare `date` to today's date (provided in context). If "
+        "the memory is older than `revalidate` days it is STALE — do not "
+        "present it as fact; downgrade to "
+        "**(educated guess — re-validation due, last researched <date>)** "
+        "and, if it matters, suggest re-running research. A memory with no "
+        "EV header is an ordinary observation: treat as (educated guess) "
+        "at best, never as researched fact.\n"
+        "Never upgrade a guess to a fact by restating it confidently. "
+        "Provenance, not tone, determines the label."
+    )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -503,6 +550,11 @@ class Filter:
         if user_valves and hasattr(user_valves, "enabled") and not user_valves.enabled:
             return body
 
+        # Inject the epistemic-taxonomy instruction on EVERY path (incl.
+        # the early-return ones below) so confidence grading + active tool
+        # use are always in force, independent of recall results.
+        self._inject_epistemic_block(body)
+
         # Strip redundant mnemory MCP tools to save prompt tokens.
         # The filter handles recall automatically — these tools would
         # only waste tokens in the tools[] array on every LLM request.
@@ -561,6 +613,13 @@ class Filter:
             if user_id:
                 self._pending_sessions.pop(user_id, None)
 
+        # Resolve effective status visibility (admin AND user valve).
+        # Must be computed BEFORE the early-return branches below that
+        # reference show_status (e.g. skip_recall_with_tools).
+        show_status = self.valves.show_status
+        if show_status and user_valves and hasattr(user_valves, "show_status"):
+            show_status = user_valves.show_status
+
         # In first_only mode, skip recall on subsequent messages.
         # Still inject cached static context so the LLM keeps its
         # memory instructions and core memories.
@@ -610,10 +669,8 @@ class Filter:
             self._inject_static_context(body, sess)
             return body  # No query on subsequent turn — skip search
 
-        # Show status (admin valve AND user valve must both be true)
-        show_status = self.valves.show_status
-        if show_status and user_valves and hasattr(user_valves, "show_status"):
-            show_status = user_valves.show_status
+        # show_status was resolved earlier (before the early-return
+        # branches). Announce the recall pass.
         if __event_emitter__ and show_status:
             await __event_emitter__(
                 {
@@ -711,10 +768,16 @@ class Filter:
             static_ctx = None
             if is_first:
                 static_parts = []
-                if result.get("instructions"):
-                    static_parts.append(result["instructions"])
-                if result.get("core_memories"):
-                    static_parts.append(result["core_memories"])
+                # Hybrid recall: by default DON'T cache mnemory's own
+                # instructions or wholesale pinned core memories — that
+                # was the start-of-chat noise. The epistemic block (always
+                # injected separately) replaces the instruction role; the
+                # model can search_memory for identity/prefs on demand.
+                if self.valves.inject_core_memories:
+                    if result.get("instructions"):
+                        static_parts.append(result["instructions"])
+                    if result.get("core_memories"):
+                        static_parts.append(result["core_memories"])
                 static_ctx = "\n\n".join(static_parts) if static_parts else None
                 await self._debug(
                     __event_emitter__,
@@ -753,11 +816,6 @@ class Filter:
         # the static context (often 1-2k tokens) is cached instead of
         # being re-processed on every turn.
 
-        # Move /no_think from system prompt to last user message
-        # so Qwen3 models actually honor it.
-        if self.valves.move_no_think:
-            self._move_no_think(body)
-
         # 1. Static context — always inject from cache
         has_static = sess and bool(sess.get("static_ctx"))
         self._inject_static_context(body, sess)
@@ -791,6 +849,28 @@ class Filter:
 
         return body
 
+    def _inject_epistemic_block(self, body: dict) -> None:
+        """Insert the epistemic-taxonomy instruction once, at a stable
+        early position (after leading system messages). Idempotent."""
+        if not self.valves.inject_epistemic_block:
+            return
+        messages = body.get("messages")
+        if not isinstance(messages, list):
+            return
+        marker = "## Memory & evidence protocol"
+        for m in messages:
+            c = m.get("content")
+            if m.get("role") == "system" and isinstance(c, str) and marker in c:
+                return  # already present this turn
+        insert_idx = 0
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "system":
+                insert_idx = i + 1
+            else:
+                break
+        messages.insert(insert_idx,
+                        {"role": "system", "content": self._EPISTEMIC_BLOCK})
+
     @staticmethod
     def _inject_static_context(body: dict, sess: dict | None) -> None:
         """Inject cached static context at a fixed early position.
@@ -819,30 +899,6 @@ class Filter:
                 "content": sess["static_ctx"],
             },
         )
-
-    @staticmethod
-    def _move_no_think(body: dict) -> None:
-        """Move /no_think from system messages to the last user message.
-
-        Qwen3 only honors /no_think when it appears in a user message,
-        not in the system prompt.  This lets each agent opt in by
-        placing /no_think in its system prompt.
-        """
-        messages = body.get("messages", [])
-        found = False
-        for msg in messages:
-            if msg.get("role") == "system":
-                content = msg.get("content", "")
-                if "/no_think" in content:
-                    msg["content"] = content.replace("/no_think", "").strip()
-                    found = True
-        if found:
-            for msg in reversed(messages):
-                if msg.get("role") == "user":
-                    content = msg.get("content", "")
-                    if "/no_think" not in content:
-                        msg["content"] = content + " /no_think"
-                    break
 
     @staticmethod
     def _build_status(result: dict | None, is_first: bool) -> str:
